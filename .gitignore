@@ -1,0 +1,33 @@
+# Node / JS
+node_modules/
+npm-debug.log*
+package-lock.json
+yarn.lock
+
+# System
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+*.code-workspace
+
+# PHP
+vendor/
+.env
+
+# Build / Temp
+dist/
+build/
+.tmp/
+
+# Media / Large assets
+*.mp4
+*.mov
+*.gif
+
+# OS files
+desktop.ini
+
+# Logs
+*.log
