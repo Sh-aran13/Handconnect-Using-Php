@@ -2,13 +2,19 @@ const videoElement = document.getElementById('inputVideo');
 const canvasElement = document.getElementById('outputCanvas');
 const canvasCtx = canvasElement.getContext('2d');
 const startButton = document.getElementById('startButton');
+const mirrorButton = document.getElementById('mirrorButton');
+const snapshotButton = document.getElementById('snapshotButton');
 const fpsValue = document.getElementById('fpsValue');
 const statusText = document.getElementById('statusText');
 const gestureValue = document.getElementById('gestureValue');
+const motionValue = document.getElementById('motionValue');
+const distanceValue = document.getElementById('distanceValue');
 const themeSelect = document.getElementById('themeSelect');
 
 let canvasWidth = 1280;
 let canvasHeight = 720;
+let isMirrored = true;
+let previousHandCenters = [];
 let lastFrameTime = performance.now();
 let frameCount = 0;
 let fps = 0;
@@ -296,6 +302,102 @@ function displayGesture(name) {
 }
 function clamp(value, min, max) { return Math.min(Math.max(value, min), max); }
 
+function setMirror(enabled) {
+  isMirrored = enabled;
+  const transform = enabled ? 'scaleX(-1)' : 'scaleX(1)';
+  videoElement.style.transform = transform;
+  canvasElement.style.transform = transform;
+  if (mirrorButton) {
+    mirrorButton.textContent = enabled ? 'Unmirror' : 'Mirror';
+  }
+}
+
+function getHandCenter(landmarks) {
+  const center = landmarks.reduce((acc, cur) => ({ x: acc.x + cur.x, y: acc.y + cur.y }), { x: 0, y: 0 });
+  const count = landmarks.length || 1;
+  return { x: center.x / count, y: center.y / count };
+}
+
+function drawHandBoundingBox(landmarks, hue) {
+  const xs = landmarks.map((point) => point.x);
+  const ys = landmarks.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+
+  canvasCtx.strokeStyle = `hsla(${hue}, 100%, 80%, 0.5)`;
+  canvasCtx.lineWidth = 2;
+  canvasCtx.setLineDash([8, 8]);
+  canvasCtx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+  canvasCtx.setLineDash([]);
+
+  const center = getHandCenter(landmarks);
+  canvasCtx.strokeStyle = `hsla(${hue}, 100%, 85%, 0.9)`;
+  canvasCtx.lineWidth = 2;
+  canvasCtx.beginPath();
+  canvasCtx.moveTo(center.x - 8, center.y);
+  canvasCtx.lineTo(center.x + 8, center.y);
+  canvasCtx.moveTo(center.x, center.y - 8);
+  canvasCtx.lineTo(center.x, center.y + 8);
+  canvasCtx.stroke();
+}
+
+function captureSnapshot() {
+  const width = videoElement.videoWidth || canvasElement.width;
+  const height = videoElement.videoHeight || canvasElement.height;
+  if (!width || !height) {
+    setStatus('Snapshot unavailable yet.');
+    return;
+  }
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = width;
+  tempCanvas.height = height;
+  const tempCtx = tempCanvas.getContext('2d');
+
+  if (videoElement.videoWidth) {
+    if (isMirrored) {
+      tempCtx.translate(width, 0);
+      tempCtx.scale(-1, 1);
+    }
+    tempCtx.drawImage(videoElement, 0, 0, width, height);
+    if (isMirrored) {
+      tempCtx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+  }
+
+  tempCtx.drawImage(canvasElement, 0, 0, width, height);
+  const link = document.createElement('a');
+  link.href = tempCanvas.toDataURL('image/png');
+  link.download = `handconnect-snapshot-${Date.now()}.png`;
+  link.click();
+  setStatus('Snapshot saved.');
+}
+
+function detectHandGesture(landmarks) {
+  const tips = [8, 12, 16, 20];
+  const pip = [6, 10, 14, 18];
+  const extended = tips.map((tip, i) => landmarks[tip].y < landmarks[pip[i]].y);
+  const extendedCount = extended.filter(Boolean).length;
+  const isFist = extendedCount <= 1;
+  const isPeace = extended[1] && extended[2] && !extended[0] && !extended[3];
+  const isPoint = extended[0] && !extended[1] && !extended[2] && !extended[3];
+  if (isPeace) return 'Peace';
+  if (isFist) return 'Fist';
+  if (isPoint) return 'Point';
+  if (extendedCount >= 3) return 'Open Hand';
+  return 'Idle';
+}
+
+function formatLabel(label) {
+  return String(label).charAt(0).toUpperCase() + String(label).slice(1);
+}
+
+function updateHudStats(motionScore, gapPx) {
+  if (motionValue) motionValue.textContent = `Motion: ${Math.round(motionScore * 100)}%`;
+  if (distanceValue) distanceValue.textContent = gapPx !== null ? `Gap: ${Math.round(gapPx)}px` : 'Gap: --';
+}
+
 function renderHands(results) {
   // 1. FADE PREVIOUS FRAME TO TRANSPARENT (Motion Blur over Live Camera)
   canvasCtx.globalCompositeOperation = 'destination-out';
@@ -314,53 +416,87 @@ function renderHands(results) {
   if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
     setStatus('Point your hand(s) to the camera.');
     displayGesture('No hands');
+    const handInfoEl = document.getElementById('handInfo');
+    if (handInfoEl) handInfoEl.textContent = 'Hands: none';
     updateParticles();
     return;
   }
 
   const normalizedHands = results.multiHandLandmarks.map(normalizeLandmarks);
   const handednessArr = (results.multiHandedness || []).map(h => (h.label || h.className || 'Unknown'));
+  const displayHandedness = handednessArr.length
+    ? handednessArr.map((label) => {
+        const normalized = String(label || 'Unknown').toLowerCase();
+        if (!isMirrored) return formatLabel(label);
+        if (normalized.includes('left')) return 'Right';
+        if (normalized.includes('right')) return 'Left';
+        return formatLabel(label);
+      })
+    : normalizedHands.map((_, i) => `Hand${i + 1}`);
   
   handsDetected = normalizedHands.length;
   setStatus(`Tracking ${handsDetected} hand${handsDetected > 1 ? 's' : ''}`);
 
+  const handInfoEl = document.getElementById('handInfo');
+  if (handInfoEl) {
+    handInfoEl.textContent = `Hands: ${displayHandedness.join(' | ')}`;
+  }
+
   const averageMove = { x: 0, y: 0 };
+  const currentCenters = [];
+  let overallHandMotion = 0;
 
   // Draw Individual Hands
   normalizedHands.forEach((landmarks, handIndex) => {
-    const label = handednessArr[handIndex] || `Hand${handIndex}`;
-    const hue = label.toLowerCase().includes('left') ? 190 : 320; 
+    const label = displayHandedness[handIndex] || `Hand${handIndex + 1}`;
+    const hue = label.toLowerCase().includes('left') ? 190 : 320;
+    const center = getHandCenter(landmarks);
+    currentCenters.push(center);
 
+    drawHandBoundingBox(landmarks, hue);
     drawCyberBones(landmarks, hue);
     drawCyberJoints(landmarks, hue);
     drawPointerTips(landmarks, hue);
 
-    // Pinch Detection
+    // Pinch and gesture detection
     const thumbTip = landmarks[4];
     const indexTip = landmarks[8];
     const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
     const pinchThreshold = Math.min(canvasWidth, canvasHeight) * 0.08;
+    const gesture = detectHandGesture(landmarks);
 
     if (pinchDist < pinchThreshold) {
-      drawEnergyBeams(thumbTip, indexTip, hue); 
+      drawEnergyBeams(thumbTip, indexTip, hue);
       displayGesture('Pinch');
       if (energyGain) {
         energyGain.gain.setTargetAtTime(0.45, audioContext.currentTime, 0.02);
         setTimeout(() => energyGain.gain.setTargetAtTime(0, audioContext.currentTime, 0.06), 120);
       }
-    } else {
-      const handOpenness = landmarks[8].y < landmarks[6].y && landmarks[12].y < landmarks[10].y;
-      if (handOpenness) displayGesture('Open Hand');
+    } else if (gesture !== 'Idle') {
+      displayGesture(gesture);
     }
 
     // Motion calc
     let moveX = 0, moveY = 0;
     for (let i = 0; i < landmarks.length; i++) {
-      moveX += landmarks[i].x; moveY += landmarks[i].y;
+      moveX += landmarks[i].x;
+      moveY += landmarks[i].y;
     }
     averageMove.x += moveX / landmarks.length;
     averageMove.y += moveY / landmarks.length;
+
+    if (previousHandCenters[handIndex]) {
+      overallHandMotion += Math.hypot(center.x - previousHandCenters[handIndex].x, center.y - previousHandCenters[handIndex].y);
+    }
   });
+
+  const motionScore = clamp(overallHandMotion / 40, 0, 1);
+  const secondCenters = currentCenters.length >= 2 ? currentCenters : null;
+  const gapPx = secondCenters
+    ? Math.hypot(secondCenters[0].x - secondCenters[1].x, secondCenters[0].y - secondCenters[1].y)
+    : null;
+  updateHudStats(motionScore, gapPx);
+  previousHandCenters = currentCenters;
 
   // Finger-to-Finger connections between two hands
   if (normalizedHands.length >= 2) {
@@ -383,9 +519,10 @@ function renderHands(results) {
   // Audio modulation
   if (oscillator && filter && masterGain) {
     const motionIntensity = clamp(Math.abs(averageMove.x) + Math.abs(averageMove.y), 0, 5);
-    oscillator.frequency.setTargetAtTime(120 + motionIntensity * 60, audioContext.currentTime, 0.08);
-    filter.frequency.setTargetAtTime(800 + motionIntensity * 520, audioContext.currentTime, 0.08);
-    masterGain.gain.setTargetAtTime(0.02 + motionIntensity * 0.01, audioContext.currentTime, 0.08);
+    const motionBoost = clamp(Math.abs(motionScore) * 4, 0, 3);
+    oscillator.frequency.setTargetAtTime(120 + motionIntensity * 60 + motionBoost * 40, audioContext.currentTime, 0.08);
+    filter.frequency.setTargetAtTime(800 + motionIntensity * 520 + motionBoost * 120, audioContext.currentTime, 0.08);
+    masterGain.gain.setTargetAtTime(0.02 + motionIntensity * 0.01 + motionBoost * 0.005, audioContext.currentTime, 0.08);
   }
 }
 
@@ -418,21 +555,27 @@ function startHandTracking() {
   resumeAudio();
   setStatus('Initializing...');
 
+  videoElement.muted = true;
+  videoElement.playsInline = true;
+  videoElement.autoplay = true;
+
   const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
   hands.setOptions({
     maxNumHands: 2,
     modelComplexity: 1,
-    minDetectionConfidence: 0.75,
-    minTrackingConfidence: 0.65
+    minDetectionConfidence: 0.55,
+    minTrackingConfidence: 0.5
   });
   hands.onResults(onResults);
 
   const camera = new Camera(videoElement, {
-    onFrame: async () => { await hands.send({ image: videoElement }); },
+    onFrame: async () => {
+      await hands.send({ image: videoElement });
+    },
     width: 1280,
     height: 720
   });
-  
+
   camera.start()
     .then(() => setStatus('Camera active.'))
     .catch((error) => {
@@ -456,5 +599,25 @@ if (themeSelect) {
   themeSelect.style.display = 'inline-block'; 
 }
 
+if (mirrorButton) {
+  mirrorButton.addEventListener('click', () => {
+    setMirror(!isMirrored);
+  });
+}
+
+if (snapshotButton) {
+  snapshotButton.addEventListener('click', captureSnapshot);
+}
+
+// Resize / mirror initialization and mobile helpers
 window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 220));
+
+// Mobile browsers require a user gesture to start audio — resume on first touch
+document.addEventListener('touchstart', function _resumeOnce() {
+  try { resumeAudio(); } catch (e) {}
+  document.removeEventListener('touchstart', _resumeOnce);
+}, { passive: true });
+
+if (typeof setMirror === 'function') setMirror(isMirrored);
 resizeCanvas();
